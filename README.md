@@ -1,10 +1,13 @@
 # disk-benchmark
 
-A PowerShell script that automates storage benchmarking with Microsoft [DiskSpd](https://github.com/microsoft/diskspd), built for comparing configurations such as Non-RAID, RAID0, and RAID1. While each test runs, it also samples CPU, memory, and disk utilization concurrently.
+Scripts that automate storage benchmarking, built for comparing configurations such as Non-RAID, RAID0, and RAID1. While each test runs, they also sample CPU, memory, and disk utilization concurrently.
 
-Currently only the Windows script ([windows/Run-DiskBenchmark.ps1](windows/Run-DiskBenchmark.ps1)) is available. macOS / Linux support is planned.
+- Windows: [windows/Run-DiskBenchmark.ps1](windows/Run-DiskBenchmark.ps1), using Microsoft [DiskSpd](https://github.com/microsoft/diskspd).
+- Linux: [linux/run-disk-benchmark.sh](linux/run-disk-benchmark.sh), using [fio](https://github.com/axboe/fio).
 
-## Setup
+Both run the same 6-test matrix (mirrors CrystalDiskMark's default profile), so their CSVs can be combined for cross-platform comparison. macOS support is planned.
+
+## Windows setup
 
 1. Download DiskSpd from the [releases page](https://github.com/microsoft/diskspd/releases) and unzip it.
 2. Place `amd64\diskspd.exe` next to `windows/Run-DiskBenchmark.ps1`, or pass its location with `-DiskSpdPath`.
@@ -17,7 +20,7 @@ Currently only the Windows script ([windows/Run-DiskBenchmark.ps1](windows/Run-D
 
    Cache bypass via `-Sh` (unbuffered + write-through) works without elevation too, but a non-admin session can trigger DiskSpd's own `SeManageVolumePrivilege` warnings (error code 1300) while preparing the test file. These only affect file-prep time, not the measured results.
 
-## Usage
+### Windows usage
 
 ```powershell
 # Non-RAID: measure E: and F: individually
@@ -32,7 +35,7 @@ Currently only the Windows script ([windows/Run-DiskBenchmark.ps1](windows/Run-D
 
 Run each configuration (NonRAID → RAID0 → RAID1) and combine the resulting CSVs later for comparison.
 
-### Parameters
+### Windows parameters
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -44,25 +47,74 @@ Run each configuration (NonRAID → RAID0 → RAID1) and combine the resulting C
 | `-OutDir` | same folder as the script | Output folder for the result CSV |
 | `-Iterations` | `1` | Number of times to repeat each test, to gauge run-to-run variance (recorded in the `Iteration` column) |
 
+## Linux setup
+
+1. Install fio and jq:
+
+   ```bash
+   # Debian/Ubuntu
+   sudo apt install fio jq
+   # RHEL/Fedora
+   sudo dnf install fio jq
+   ```
+
+2. Each `--targets` entry is either a directory/mount point (a test file is created inside it) or a raw block device such as `/dev/nvme1n1` (**all data on it is destroyed** — use with care).
+3. Root is not required for O_DIRECT cache bypass, but it's recommended: writing to some mount points, and any use of a raw block device, may need root.
+
+### Linux usage
+
+```bash
+# Non-RAID: measure two mount points individually
+./linux/run-disk-benchmark.sh --targets /mnt/d1,/mnt/d2 --config NonRAID
+
+# After building a RAID0 array (e.g. mounted at /mnt/raid)
+./linux/run-disk-benchmark.sh --targets /mnt/raid --config RAID0
+
+# After building a RAID1 array
+./linux/run-disk-benchmark.sh --targets /mnt/raid --config RAID1
+```
+
+Run each configuration (NonRAID → RAID0 → RAID1) and combine the resulting CSVs later for comparison.
+
+### Linux parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `--targets`, `-T` | *(required)* | Comma-separated list of mount points / directories / raw block devices, one or more |
+| `--config`, `-c` | `NonRAID` | Config label recorded in the CSV as the comparison axis: `NonRAID` / `RAID0` / `RAID1` |
+| `--size-gb`, `-s` | `8` | Test file size in GB; use a size large enough to exceed the SSD's cache |
+| `--duration`, `-d` | `30` | Duration of each test in seconds |
+| `--fio-path` | auto-detected | Path to `fio`; if omitted, the script looks on PATH |
+| `--ioengine` | `libaio` | fio ioengine (e.g. `io_uring` on newer kernels/fio) |
+| `--outdir`, `-o` | same folder as the script | Output folder for the result CSV |
+| `--iterations`, `-i` | `1` | Number of times to repeat each test, to gauge run-to-run variance (recorded in the `Iteration` column) |
+
 ## What gets measured
 
-For each drive, the script runs 6 tests (Read/Write across 3 patterns), mirroring CrystalDiskMark's default profile.
+For each drive/target, the script runs 6 tests (Read/Write across 3 patterns), mirroring CrystalDiskMark's default profile.
 
-| Test | Description | DiskSpd options |
-|---|---|---|
-| `SEQ1M-Q8T1` | Sequential, 1MB blocks, queue depth 8 | `-b1M -o8 -t1` |
-| `RND4K-Q32T16` | Random parallel IOPS (OS/app/DB-style workload) | `-b4K -o32 -t16 -r` |
-| `RND4K-Q1T1` | Random, QD1 (responsiveness/latency) | `-b4K -o1 -t1 -r` |
+| Test | Description | DiskSpd options | fio options |
+|---|---|---|---|
+| `SEQ1M-Q8T1` | Sequential, 1MB blocks, queue depth 8 | `-b1M -o8 -t1` | `--bs=1M --iodepth=8 --numjobs=1` |
+| `RND4K-Q32T16` | Random parallel IOPS (OS/app/DB-style workload) | `-b4K -o32 -t16 -r` | `--bs=4k --iodepth=32 --numjobs=16` |
+| `RND4K-Q1T1` | Random, QD1 (responsiveness/latency) | `-b4K -o1 -t1 -r` | `--bs=4k --iodepth=1 --numjobs=1` |
 
-Common options: `-Sh` (disable caching, unbuffered, write-through), `-L` (latency), `-W5` (5s warmup), `-C1` (1s cooldown).
+- Windows common options: `-Sh` (disable caching, unbuffered, write-through), `-L` (latency), `-W5` (5s warmup), `-C1` (1s cooldown).
+- Linux common options: `--direct=1` (bypass page cache), `--ioengine=libaio` (async I/O so `--iodepth` is meaningful), `--ramp_time=5` (5s warmup, excluded from stats).
 
 ## Concurrent utilization sampling
 
-DiskSpd is launched as a background process, and while it runs the script samples the following once per second via CIM classes (language-neutral, so it works on localized Windows too), recording the average and maximum for each test:
+Each run's engine (DiskSpd / fio) is launched as a background process, and while it runs the script samples the following once per second, recording the average and maximum for each test:
 
+**Windows** (via CIM classes, language-neutral so it works on localized Windows too):
 - **CPU**: `Win32_PerfFormattedData_PerfOS_Processor` (total processor busy % for `_Total`)
 - **Memory**: `Win32_OperatingSystem` (percentage of physical memory in use)
 - **Disk**: `Win32_PerfFormattedData_PerfDisk_LogicalDisk` (`100 - % Idle Time` for the target drive)
+
+**Linux** (via `/proc`):
+- **CPU**: `/proc/stat` (`100 - idle - iowait`, delta between samples)
+- **Memory**: `/proc/meminfo` (`(MemTotal - MemAvailable) / MemTotal`)
+- **Disk**: `/proc/diskstats` field 13 (time spent doing I/Os), delta over wall-clock time — the same method `iostat` uses for `%util`. The target path is resolved to its own device/partition/array name (symlinks such as `/dev/mapper/...` are canonicalized), matching the Windows script's per-logical-disk semantics.
 
 ## Output
 
@@ -72,7 +124,7 @@ Each test's result is printed to the console like this:
 SEQ1M-Q8T1-Read          559.3 MB/s |        533 IOPS |  14.997 ms  ||  CPU  14/ 31%  Mem  18%  Disk  95/100%
 ```
 
-Every run writes a fresh, timestamped CSV to `-OutDir` (default: the script's own folder), named after the config and run time (e.g. `DiskBenchmark_NonRAID_20260730_131538.csv`).
+Every run writes a fresh, timestamped CSV to `-OutDir` / `--outdir` (default: the script's own folder), named after the config and run time (e.g. `DiskBenchmark_NonRAID_20260730_131538.csv`). Both scripts write the same columns, so CSVs from Windows and Linux runs can be combined directly.
 
 CSV columns:
 
@@ -80,16 +132,16 @@ CSV columns:
 |---|---|
 | `Timestamp` | Run timestamp |
 | `Config` | Config label (NonRAID/RAID0/RAID1) |
-| `Drive` | Drive letter |
+| `Drive` | Drive letter (Windows) or target path/device (Linux) |
 | `Test` | Test name |
-| `Iteration` | Repeat count (`-Iterations`) |
+| `Iteration` | Repeat count (`-Iterations` / `--iterations`) |
 | `MBps` | Throughput in MB/s (decimal) |
 | `IOPS` | IOPS |
 | `AvgLat_ms` | Average latency (ms) |
 | `CPU_Avg_pct` / `CPU_Max_pct` | Average / max CPU utilization |
 | `Mem_Avg_pct` / `Mem_Max_pct` | Average / max memory utilization |
 | `Disk_Avg_pct` / `Disk_Max_pct` | Average / max utilization of the target drive |
-| `IsAdmin` | Whether the run was elevated |
+| `IsAdmin` | Whether the run was elevated (Administrator on Windows, root on Linux) |
 | `SizeGB` | Test file size |
 | `Duration_sec` | Test duration in seconds |
 
@@ -103,4 +155,4 @@ Example:
 
 ## Roadmap
 
-- macOS / Linux scripts
+- macOS script

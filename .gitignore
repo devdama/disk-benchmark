@@ -1,0 +1,10 @@
+# Benchmark output
+*.csv
+
+# DiskSpd binary (Windows) - download separately, see README
+windows/diskspd.exe
+windows/amd64/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
