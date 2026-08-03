@@ -1,5 +1,3 @@
-# Benchmark output
-*.csv
 
 # DiskSpd binary (Windows) - download separately, see README
 windows/diskspd.exe
